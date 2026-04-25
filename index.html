@@ -221,6 +221,8 @@ textarea{resize:vertical;min-height:80px;}
   .tmpl-feats{grid-template-columns:1fr;}
 }
 </style>
+<!-- SheetJS — reads .xlsx files in the browser for real Excel data extraction -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
 
@@ -758,8 +760,8 @@ textarea{resize:vertical;min-height:80px;}
   <div class="alert a-info">ℹ Uploading your completed Excel template maintains the digital link required by HMRC MTD (SI 2018/261). 9 boxes populate instantly from your spreadsheet — no manual retyping.</div>
   <div class="upzone" id="xl-zone" onclick="document.getElementById('xl-inp').click()" ondragover="event.preventDefault();this.classList.add('drag')" ondragleave="this.classList.remove('drag')" ondrop="handleXLDrop(event)">
    <div style="font-size:32px;margin-bottom:8px;">📊</div>
-   <div style="font-size:14px;color:var(--text2);">Drop your completed VATflow Excel template here</div>
-   <div style="font-size:12px;color:var(--text3);margin-top:4px;">Or click to browse · .xlsx, .xls, .csv</div>
+   <div style="font-size:14px;color:var(--text2);">Drop your completed VATflow Excel template here to auto-populate all 9 boxes</div>
+   <div style="font-size:12px;color:var(--text3);margin-top:4px;">Or click to browse · .xlsx files only (VATflow template)</div>
   </div>
   <input type="file" id="xl-inp" style="display:none" accept=".xlsx,.xls,.csv" onchange="handleXLUpload(this)">
   <div id="xl-preview" style="margin-top:12px;display:none;"></div>
@@ -1479,15 +1481,90 @@ function downloadTemplate() {
   setTimeout(() => notify('✅ Template downloaded! Fill in Sales & Expenses tabs, then upload here.'), 1000);
 }
 function handleXLUpload(input) {
-  if (input.files.length > 0) {
-    const f = input.files[0];
-    const prev = document.getElementById('xl-preview');
-    prev.style.display = 'block';
-    prev.innerHTML = `<div class="alert a-ok">✅ "${f.name}" uploaded — reading 9-box values...<br>
-    <strong>Box 1:</strong> £7,365.60 · <strong>Box 4:</strong> £0.00 · <strong>Box 5:</strong> £7,365.60 · <strong>Box 6:</strong> £44,640.00<br>
-    <button class="btn btn-amber" style="margin-top:8px;" onclick="applyFromExcel()">Apply to VAT Return ↗</button></div>`;
-    notify('📊 Excel template read successfully — 9 boxes extracted');
-  }
+  if (!input.files || input.files.length === 0) return;
+  const f = input.files[0];
+  const prev = document.getElementById('xl-preview');
+  prev.style.display = 'block';
+  prev.innerHTML = '<div class="alert a-info">⏳ Reading Excel file — please wait...</div>';
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      if (typeof XLSX === 'undefined') throw new Error('SheetJS not loaded. Please refresh the page.');
+      const data = new Uint8Array(e.target.result);
+      const wb = XLSX.read(data, { type: 'array', cellDates: true });
+      // ── VAT_Return sheet: Box 1-9 in column C rows 15-23 ──
+      const vr = wb.Sheets['VAT_Return'];
+      if (!vr) throw new Error('VAT_Return sheet not found. Please use the official VATflow Excel template.');
+      const getN = (s, r) => { const c = s[r]; if (!c) return 0; const v = parseFloat(c.v); return isNaN(v) ? 0 : v; };
+      const getS = (s, r) => { const c = s[r]; return c ? String(c.v || '') : ''; };
+      const b1=getN(vr,'C15'), b2=getN(vr,'C16'), b3=getN(vr,'C17');
+      const b4=getN(vr,'C18'), b5=getN(vr,'C19'), b6=getN(vr,'C20');
+      const b7=getN(vr,'C21'), b8=getN(vr,'C22'), b9=getN(vr,'C23');
+      // ── Dashboard sheet: business info ──
+      const ds = wb.Sheets['Dashboard'];
+      let bizName='', vrn='', scheme='', frsPct='', ps='', pe='', dd='';
+      if (ds) {
+        bizName = getS(ds,'B5'); vrn = getS(ds,'B6');
+        scheme = getS(ds,'B15');
+        const fv = ds['B16']; frsPct = fv ? (parseFloat(fv.v)*100).toFixed(1)+'%' : '16.5%';
+        const fmtD = (cell) => {
+          if (!cell) return '';
+          if (cell.t==='d' && cell.v instanceof Date) {
+            return cell.v.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+          }
+          if (cell.t==='n') {
+            const d = new Date(Math.round((cell.v - 25569)*86400*1000));
+            return d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+          }
+          return String(cell.v||'');
+        };
+        ps=fmtD(ds['B10']); pe=fmtD(ds['B11']); dd=fmtD(ds['B12']);
+      }
+      // ── Arithmetic checks ──
+      const ok3 = Math.abs(Math.round((b1+b2)*100)/100 - b3) < 0.02;
+      const ok5 = Math.abs(Math.round((b3-b4)*100)/100 - b5) < 0.02;
+      const fmt = (n) => { const s=n.toFixed(2); const p=s.indexOf('.'); let r=''; for(let i=0;i<p;i++){if(i>0&&(p-i)%3===0)r+=',';r+=s[i];}return '£'+r+s.slice(p); };
+      const tick = (ok) => ok ? '<span style="color:var(--green);font-weight:700;">✓</span>' : '<span style="color:var(--red);font-weight:700;">⚠</span>';
+      window._xlData = {b1,b2,b3,b4,b5,b6,b7,b8,b9,bizName,vrn,scheme,frsPct,ps,pe,dd,fn:f.name};
+      prev.innerHTML = `<div class="alert a-ok" style="flex-direction:column;align-items:flex-start;gap:10px;">
+        <div style="font-size:14px;font-weight:700;color:var(--green);">✅ ${f.name} — Read Successfully</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;width:100%;font-size:12px;background:var(--bg3);padding:10px;border-radius:8px;">
+          ${bizName?`<div><strong>Business:</strong> ${bizName}</div>`:''}
+          ${vrn?`<div><strong>VRN:</strong> ${vrn}</div>`:''}
+          ${scheme?`<div><strong>Scheme:</strong> ${scheme} ${frsPct&&scheme.includes('Flat')?'('+frsPct+')':''}</div>`:''}
+          ${ps?`<div><strong>Period:</strong> ${ps} – ${pe}</div>`:''}
+          ${dd?`<div><strong>Due:</strong> ${dd}</div>`:''}
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead><tr style="background:var(--navy);color:#fff;">
+            <th style="padding:7px 10px;text-align:left;width:60px;">Box</th>
+            <th style="padding:7px 10px;text-align:left;">Description</th>
+            <th style="padding:7px 10px;text-align:right;">Amount</th>
+          </tr></thead>
+          <tbody>
+            <tr style="background:var(--amber-pale)"><td style="padding:6px 10px;border-bottom:1px solid var(--border);font-weight:700;color:var(--amber);">1</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);">VAT due on sales</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);text-align:right;font-family:monospace;">${fmt(b1)}</td></tr>
+            <tr><td style="padding:6px 10px;border-bottom:1px solid var(--border);font-weight:700;color:var(--navy);">2</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);">VAT on EC acquisitions (NI)</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);text-align:right;font-family:monospace;">${fmt(b2)}</td></tr>
+            <tr style="background:var(--bg3)"><td style="padding:6px 10px;border-bottom:1px solid var(--border);font-weight:700;color:var(--navy);">3 ${tick(ok3)}</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);">Total VAT due (auto)</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);text-align:right;font-family:monospace;">${fmt(b3)}</td></tr>
+            <tr style="background:var(--amber-pale)"><td style="padding:6px 10px;border-bottom:1px solid var(--border);font-weight:700;color:var(--amber);">4</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);">VAT reclaimed on purchases</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);text-align:right;font-family:monospace;">${fmt(b4)}</td></tr>
+            <tr style="background:var(--green2)"><td style="padding:6px 10px;border-bottom:1px solid var(--border);font-weight:700;color:var(--green);">5 ${tick(ok5)}</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);font-weight:700;color:var(--green);">NET VAT PAYABLE</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);text-align:right;font-family:monospace;font-weight:700;color:var(--green);">${fmt(b5)}</td></tr>
+            <tr><td style="padding:6px 10px;border-bottom:1px solid var(--border);font-weight:700;color:var(--navy);">6</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);">Total sales excl. VAT</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);text-align:right;font-family:monospace;">${fmt(b6)}</td></tr>
+            <tr style="background:var(--bg3)"><td style="padding:6px 10px;border-bottom:1px solid var(--border);font-weight:700;color:var(--navy);">7</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);">Total purchases excl. VAT</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);text-align:right;font-family:monospace;">${fmt(b7)}</td></tr>
+            <tr><td style="padding:6px 10px;border-bottom:1px solid var(--border);font-weight:700;color:var(--navy);">8</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);">Goods to EC states excl. VAT</td><td style="padding:6px 10px;border-bottom:1px solid var(--border);text-align:right;font-family:monospace;">${fmt(b8)}</td></tr>
+            <tr><td style="padding:6px 10px;font-weight:700;color:var(--navy);">9</td><td style="padding:6px 10px;">EC acquisitions excl. VAT (NI)</td><td style="padding:6px 10px;text-align:right;font-family:monospace;">${fmt(b9)}</td></tr>
+          </tbody>
+        </table>
+        <div class="btn-grp">
+          <button class="btn btn-amber btn-lg" onclick="applyFromExcel()">✅ Apply All 9 Boxes to VAT Return →</button>
+          <button class="btn btn-sec" onclick="document.getElementById('xl-preview').style.display='none'">Dismiss</button>
+        </div>
+      </div>`;
+      notify('📊 Excel file read — all 9 boxes extracted. Click Apply to populate your return.');
+    } catch(err) {
+      prev.innerHTML = `<div class="alert a-err">❌ ${err.message}<br><span style="font-size:12px;">Only the VATflow Excel template (.xlsx) is supported.</span></div>`;
+      notify('❌ ' + err.message);
+    }
+  };
+  reader.readAsArrayBuffer(f);
 }
 function handleXLDrop(e) {
   e.preventDefault();
@@ -1495,12 +1572,25 @@ function handleXLDrop(e) {
   if (e.dataTransfer.files[0]) handleXLUpload({ files: e.dataTransfer.files });
 }
 function applyFromExcel() {
-  showPage('return-form');
-  document.getElementById('box1').value = '7365.60';
-  document.getElementById('box4').value = '0.00';
-  document.getElementById('box6').value = '44640.00';
+  const d = window._xlData;
+  if (!d) { notify('Please upload the Excel template first.'); return; }
+  document.getElementById('box1').value = d.b1.toFixed(2);
+  document.getElementById('box2').value = d.b2.toFixed(2);
+  document.getElementById('box4').value = d.b4.toFixed(2);
+  document.getElementById('box6').value = d.b6.toFixed(2);
+  document.getElementById('box7').value = d.b7.toFixed(2);
+  document.getElementById('box8').value = d.b8.toFixed(2);
+  document.getElementById('box9').value = d.b9.toFixed(2);
   recalc();
-  notify('✅ 9 boxes populated from Excel template (Flat Rate Scheme)');
+  document.getElementById('dash-b1').textContent = '£' + d.b1.toFixed(2);
+  document.getElementById('dash-b4').textContent = '£' + d.b4.toFixed(2);
+  document.getElementById('dash-b5').textContent = '£' + Math.abs(d.b5).toFixed(2);
+  if (d.bizName) { S.cos[S.activeCo].name = d.bizName; if (d.vrn) S.cos[S.activeCo].vrn = d.vrn; updateUI(); }
+  const sc = d.scheme.toLowerCase();
+  updateSchemeNote(sc.includes('flat')?'flatrate':sc.includes('cash')?'cash':sc.includes('annual')?'annual':'standard');
+  document.getElementById('cur-scheme').textContent = d.scheme + (d.scheme.includes('Flat')?' ('+d.frsPct+')':'');
+  showPage('return-form');
+  notify('✅ All 9 boxes populated from ' + d.fn + ' — verify and submit when ready.');
 }
 
 // ══ INTEGRATIONS ══════════════════════════════════════════════════════════
